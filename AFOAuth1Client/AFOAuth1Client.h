@@ -172,3 +172,16 @@ extern NSString * const kAFApplicationLaunchOptionsURLKey;
         renewable:(BOOL)canBeRenewed;
 
 @end
+
+@interface NSString (AFOAuth1Client)
+
+// better percent escape
+- (NSString *)pcen;
+@end
+
+@interface NSURL (AFOAuth1Client)
+/*
+ Get host:port from URL unless port is 80 or 443 (http://tools.ietf.org/html/rfc5849#section-3.4.1.2). Otherwis reurn only host.
+ */
+- (NSString *)hostAndPort;
+@end

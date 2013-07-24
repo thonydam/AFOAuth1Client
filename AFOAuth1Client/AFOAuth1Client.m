@@ -22,6 +22,8 @@
 
 #import "AFOAuth1Client.h"
 #import "AFHTTPRequestOperation.h"
+#import "Constant.h"
+#import "NSData+Base64.h"
 
 #import <CommonCrypto/CommonHMAC.h>
 
@@ -209,6 +211,116 @@ static inline NSString * AFHMACSHA1Signature(NSURLRequest *request, NSString *co
     return parameters;
 }
 
+- (NSDictionary *)dictionaryWithURLEncodedString:(NSString *)URLEncodedString
+{
+    NSMutableDictionary *queryComponents = [NSMutableDictionary dictionary];
+    for (NSString *keyValuePairString in [URLEncodedString componentsSeparatedByString:@"&"]) {
+        NSArray *keyValuePairArray = [keyValuePairString componentsSeparatedByString:@"="];
+        if ([keyValuePairArray count] < 2) continue; // Verify that there is at least one key, and at least one value.  Ignore extra = signs
+        NSString *key = [[keyValuePairArray objectAtIndex:0] stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+        NSString *value = [[keyValuePairArray objectAtIndex:1] stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+        
+        // URL spec says that multiple values are allowed per key
+        NSMutableArray* results = [queryComponents objectForKey:key];
+        if (results) {
+            if ([results isKindOfClass:[NSMutableArray class]]) {
+                [(NSMutableArray *)results addObject:value];
+            } else {
+                // On second occurrence of the key, convert into an array
+                NSMutableArray *values = [NSMutableArray arrayWithObjects:results, value, nil];
+                [queryComponents setObject:values forKey:key];
+            }
+        } else {
+            [queryComponents setObject:value forKey:key];
+        }
+        [results addObject:value];
+    }
+    return queryComponents;
+}
+
+- (NSDictionary *) requestParametersWithRequest:(NSURLRequest *)request {
+
+    return [self dictionaryWithURLEncodedString:[[request URL] query]];
+}
+
+- (NSString *)signatureWithRequest:(NSURLRequest *)request consumerSecret:(NSString *)consumerSecret tokenSecret:(NSString *)tokenSecret {
+    
+    // get signature components
+    NSString * baseStr = [self signatureBaseWithRequest:request];
+    NSData *base = [baseStr dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *secret = tokenSecret ? tokenSecret : @"";
+    NSString *secretString = [NSString stringWithFormat:@"%@&%@", consumerSecret, secret];
+    NSData *secretStringData = [secretString dataUsingEncoding:NSUTF8StringEncoding];
+    
+    // hmac
+    uint8_t digest[CC_SHA1_DIGEST_LENGTH];
+    CCHmacContext cx;
+    CCHmacInit(&cx, kCCHmacAlgSHA1, [secretStringData bytes], [secretStringData length]);
+    CCHmacUpdate(&cx, [base bytes], [base length]);
+    CCHmacFinal(&cx, digest);
+    
+    // base 64
+    NSData *data = [NSData dataWithBytes:digest length:CC_SHA1_DIGEST_LENGTH];
+    return [data base64EncodedString];
+    
+}
+- (NSString *)signatureBaseWithRequest:(NSURLRequest *)request {
+    
+    // normalize parameters
+    NSMutableDictionary *parameters = [NSMutableDictionary dictionary];
+    [parameters addEntriesFromDictionary:[self OAuthParameters]];
+    [parameters addEntriesFromDictionary:[self requestParametersWithRequest:request]];
+    NSMutableArray *entries = [NSMutableArray arrayWithCapacity:[parameters count]];
+    NSArray *keys = [[parameters allKeys] sortedArrayUsingSelector:@selector(compare:)];
+    for (NSString *key in keys) {
+        NSString *obj = [parameters objectForKey:key];
+        NSString *entry = [NSString stringWithFormat:@"%@=%@", [key pcen], [obj pcen]];
+        [entries addObject:entry];
+    }
+    NSString *normalizedParameters = [entries componentsJoinedByString:@"&"];
+    
+    // construct request url
+    NSURL *URL = [request URL];
+    
+    // Use CFURLCopyPath so that the path is preserved with trailing slash, then escape the percents ourselves
+    NSString *pathWithPrevervedTrailingSlash = [CFBridgingRelease(CFURLCopyPath((CFURLRef)URL)) stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+    
+    NSString *URLString = @"";
+    
+#if defined(ENVIRONMENT_PRODUCTION)
+    //Prod
+    URLString = [NSString stringWithFormat:@"%@://%@%@",
+                 [[URL scheme] lowercaseString],
+                 [[URL hostAndPort] lowercaseString],
+                 pathWithPrevervedTrailingSlash];
+#else
+    //Dev & TEST
+    
+    NSString * port = @":8080";
+    
+    if ([[[URL hostAndPort] lowercaseString] isEqualToString:@"capi1.travelersnetwork.com"])
+        port = @"";
+    
+    URLString = [NSString stringWithFormat:@"%@://%@%@%@",
+                 [[URL scheme] lowercaseString],
+                 [[URL hostAndPort] lowercaseString],
+                 port,
+                 pathWithPrevervedTrailingSlash];
+#endif
+    
+    
+    // create components
+    NSArray *components = [NSArray arrayWithObjects:
+                           [[request HTTPMethod] pcen],
+                           [URLString pcen],
+                           [normalizedParameters pcen],
+                           nil];
+    
+    // return
+    return [components componentsJoinedByString:@"&"];
+    
+}
+
 - (NSString *)OAuthSignatureForMethod:(NSString *)method
                                  path:(NSString *)path
                            parameters:(NSDictionary *)parameters
@@ -221,7 +333,7 @@ static inline NSString * AFHMACSHA1Signature(NSURLRequest *request, NSString *co
 
     switch (self.signatureMethod) {
         case AFHMACSHA1SignatureMethod:
-            return AFHMACSHA1Signature(request, self.secret, tokenSecret, self.stringEncoding);
+            return [self signatureWithRequest:request consumerSecret:self.secret tokenSecret:tokenSecret]; //AFHMACSHA1Signature(request, self.secret, tokenSecret, self.stringEncoding);
         default:
             return nil;
     }
@@ -391,7 +503,7 @@ static inline NSString * AFHMACSHA1Signature(NSURLRequest *request, NSString *co
 
     NSMutableURLRequest *request = [super requestWithMethod:method path:path parameters:mutableParameters];
 
-    [request setValue:[self authorizationHeaderForMethod:method path:path parameters:parameters] forHTTPHeaderField:@"Authorization"];
+    [request setValue:[self authorizationHeaderForMethod:method path:path parameters:nil] forHTTPHeaderField:@"Authorization"];
     [request setHTTPShouldHandleCookies:NO];
     
     return request;
@@ -562,4 +674,27 @@ static inline NSString * AFHMACSHA1Signature(NSURLRequest *request, NSString *co
     return copy;
 }
 
+
+@end
+
+@implementation NSString (AFOAuth1Client)
+- (NSString *)pcen {
+    CFStringRef string = CFURLCreateStringByAddingPercentEscapes(NULL,
+                                                                 (CFStringRef)self,
+                                                                 NULL,
+                                                                 CFSTR("!*'();:@&=+$,/?%#[]"),
+                                                                 kCFStringEncodingUTF8);
+    return (__bridge_transfer  NSString *)(string);
+}
+
+@end
+
+@implementation NSURL  (AFOAuth1Client)
+- (NSString *)hostAndPort {
+    if ([self port] != nil && [[self port] intValue] != 80 && [[self port] intValue] != 443) {
+        return [NSString stringWithFormat:@"%@:%@", [self host], [self port]];
+    } else {
+        return [self host];
+    }
+}
 @end
